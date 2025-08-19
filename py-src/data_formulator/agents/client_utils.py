@@ -102,6 +102,7 @@ class Client(object):
     def _get_bedrock_completion(self, messages):
         """
         Handle AWS Bedrock completion using boto3 directly.
+        Supports both Claude and Nova models.
         """
         # Create boto3 client for Bedrock Runtime
         session_kwargs = {
@@ -117,6 +118,14 @@ class Client(object):
         session = boto3.Session(**session_kwargs)
         bedrock_client = session.client('bedrock-runtime')
         
+        # Determine model type and prepare request accordingly
+        if self.model.startswith('amazon.nova'):
+            return self._handle_nova_model(bedrock_client, messages)
+        else:
+            return self._handle_claude_model(bedrock_client, messages)
+    
+    def _handle_claude_model(self, bedrock_client, messages):
+        """Handle Claude models (Anthropic)"""
         # Convert messages to Claude format
         system_message = ""
         user_messages = []
@@ -148,7 +157,58 @@ class Client(object):
         # Parse the response
         response_body = json.loads(response['body'].read())
         
-        # Create a response object that matches the expected format
+        # Extract content from Claude response
+        content = response_body.get('content', [{}])[0].get('text', '')
+        
+        return self._create_bedrock_response(content)
+    
+    def _handle_nova_model(self, bedrock_client, messages):
+        """Handle Amazon Nova models"""
+        # Nova models don't support system role and expect content as array
+        nova_messages = []
+        for message in messages:
+            if message["role"] == "system":
+                # Convert system message to user message with clear instruction
+                nova_messages.append({
+                    "role": "user",
+                    "content": [{"text": f"System instruction: {message['content']}"}]
+                })
+            else:
+                # Convert content to array format for Nova
+                content = message["content"]
+                if isinstance(content, str):
+                    content = [{"text": content}]
+                nova_messages.append({
+                    "role": message["role"],
+                    "content": content
+                })
+        
+        # Prepare the request body for Nova (using correct Nova API format)
+        body = {
+            "messages": nova_messages,
+            "inferenceConfig": {
+                "max_new_tokens": self.params.get("max_completion_tokens", 1200),
+                "temperature": self.params.get("temperature", 0.7)
+            }
+        }
+        
+        # Make the request to Bedrock
+        response = bedrock_client.invoke_model(
+            modelId=self.model,
+            body=json.dumps(body),
+            contentType='application/json'
+        )
+        
+        # Parse the response
+        response_body = json.loads(response['body'].read())
+        
+        # Extract content from Nova response
+        content = response_body.get('output', {}).get('message', {}).get('content', [{}])[0].get('text', '')
+        
+        return self._create_bedrock_response(content)
+    
+    def _create_bedrock_response(self, content):
+        """Create a standardized response object"""
         class BedrockResponse:
             def __init__(self, content):
                 self.choices = [BedrockChoice(content)]
@@ -160,9 +220,6 @@ class Client(object):
         class BedrockMessage:
             def __init__(self, content):
                 self.content = content
-                self.role = "assistant"  # Claude always responds as assistant
-        
-        # Extract content from Claude response
-        content = response_body.get('content', [{}])[0].get('text', '')
+                self.role = "assistant"
         
         return BedrockResponse(content)
