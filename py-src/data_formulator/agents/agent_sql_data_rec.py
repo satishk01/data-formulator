@@ -75,6 +75,11 @@ some notes:
 - NEVER use TO_DATE, DATE, or other SQL Server/Oracle date functions - they don't exist in DuckDB
 - For current date, use CURRENT_DATE or TODAY()
 - For date arithmetic, use INTERVAL: date_column + INTERVAL 1 DAY
+- CRITICAL: Column names with spaces MUST be quoted with double quotes. Example: "Date received" not Date received
+- CRITICAL: When parsing dates from string columns, use: strptime("Date received", '%m/%d/%y') or strptime("Date received", '%m-%d-%Y')
+- NEVER use complex date arithmetic like DATE '1970-01-01' + DATE_PART('day', column) - this is incorrect
+- For quarter extraction from date strings: EXTRACT(quarter FROM strptime("Date received", '%m/%d/%y'))
+- For year extraction from date strings: EXTRACT(year FROM strptime("Date received", '%m/%d/%y'))
 '''
 
 example = """
@@ -131,6 +136,23 @@ SELECT
 FROM   
     student_exam;  
 ```
+
+IMPORTANT DATE HANDLING EXAMPLE:
+If you have a table with a date column like "Date received" containing values like "02/29/24", "03-08-2024", here's how to handle it:
+
+```sql
+SELECT 
+    Issue,
+    EXTRACT(quarter FROM strptime("Date received", '%m/%d/%y')) AS Quarter,
+    EXTRACT(year FROM strptime("Date received", '%m/%d/%y')) AS Year,
+    COUNT(*) AS Total_Tickets
+FROM complaints_table
+WHERE EXTRACT(year FROM strptime("Date received", '%m/%d/%y')) = 2024
+GROUP BY Issue, Quarter, Year
+ORDER BY Quarter, Total_Tickets DESC;
+```
+
+Note: Always quote column names with spaces using double quotes, and use strptime() for date parsing.
 """
 
 class SQLDataRecAgent(object):
