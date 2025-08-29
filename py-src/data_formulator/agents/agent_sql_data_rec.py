@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import json
+import re
 
 from data_formulator.agents.agent_utils import extract_json_objects, extract_code_from_gpt_response
 from data_formulator.agents.agent_sql_data_transform import get_sql_table_statistics_str, sanitize_table_name
@@ -17,20 +18,33 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-SYSTEM_PROMPT = '''🚨 CRITICAL: YOU MUST USE DUCKDB SYNTAX ONLY! 🚨
+SYSTEM_PROMPT = '''STOP! READ THIS FIRST - DUCKDB SYNTAX RULES:
 
-FORBIDDEN FUNCTIONS (WILL CAUSE ERRORS):
-❌ DATE_TRUNC() - does not exist in DuckDB
-❌ TRY_CAST() - does not exist in DuckDB  
-❌ TO_DATE() - does not exist in DuckDB
-❌ CAST(... AS DATE) - unreliable with string dates
+YOU MUST ONLY USE THESE FUNCTIONS FOR DATES:
+- strptime("Date received", '%m/%d/%y') 
+- EXTRACT(quarter FROM strptime("Date received", '%m/%d/%y'))
+- EXTRACT(year FROM strptime("Date received", '%m/%d/%y'))
 
-REQUIRED FUNCTIONS FOR DATES:
-✅ strptime("Date received", '%m/%d/%y') - for parsing date strings
-✅ EXTRACT(quarter FROM strptime("Date received", '%m/%d/%y')) - for date parts
-✅ "Date received" - column names with spaces MUST be quoted
+THESE FUNCTIONS DO NOT EXIST IN DUCKDB - DO NOT USE:
+- DATE_TRUNC (does not exist)
+- DATE_PARSE (does not exist) 
+- TRY_CAST (does not exist)
+- TO_DATE (does not exist)
+- CAST(...AS DATE) (unreliable)
 
-You are a data scientist to help user to recommend data that will be used for visualization.
+COLUMN NAMES WITH SPACES MUST BE QUOTED:
+- "Date received" NOT Date_received
+- "Issue" if it has special characters
+
+EXAMPLE THAT WORKS:
+SELECT 
+    "Issue",
+    EXTRACT(quarter FROM strptime("Date received", '%m/%d/%y')) AS quarter,
+    COUNT(*) AS total_tickets
+FROM table_name
+GROUP BY "Issue", quarter;
+
+Now, you are a data scientist to help user to recommend data that will be used for visualization.
 The user will provide you information about what visualization they would like to create, and your job is to recommend a transformed data that can be used to create the visualization and write a SQL query to transform the data.
 The recommendation and transformation function should be based on the [CONTEXT] and [GOAL] provided by the user. 
 The [CONTEXT] shows what the current dataset is, and the [GOAL] describes what the user wants the data for.
@@ -201,6 +215,52 @@ class SQLDataRecAgent(object):
         self.conn = conn
         self.system_prompt = system_prompt if system_prompt is not None else SYSTEM_PROMPT
 
+    def _fix_duckdb_syntax(self, sql_query: str) -> str:
+        """Fix common DuckDB syntax errors in AI-generated SQL"""
+        import re
+        
+        fixed_query = sql_query
+        
+        # Fix 1: Replace forbidden date functions with strptime
+        forbidden_patterns = [
+            (r'DATE_TRUNC\s*\(\s*[\'"]quarter[\'"]\s*,\s*([^)]+)\)', r'EXTRACT(quarter FROM \1)'),
+            (r'DATE_TRUNC\s*\(\s*[\'"]year[\'"]\s*,\s*([^)]+)\)', r'EXTRACT(year FROM \1)'),
+            (r'DATE_PARSE\s*\(\s*([^,]+)\s*,\s*([^)]+)\)', r'strptime(\1, \2)'),
+            (r'TRY_CAST\s*\(\s*([^,]+)\s*AS\s+DATE\s*\)', r'strptime(\1, \'%m/%d/%y\')'),
+            (r'CAST\s*\(\s*([^,]+)\s*AS\s+DATE\s*\)', r'strptime(\1, \'%m/%d/%y\')'),
+            (r'TO_DATE\s*\(\s*([^,]+)\s*,\s*([^)]+)\)', r'strptime(\1, \2)'),
+        ]
+        
+        for pattern, replacement in forbidden_patterns:
+            fixed_query = re.sub(pattern, replacement, fixed_query, flags=re.IGNORECASE)
+        
+        # Fix 2: Fix column name issues
+        column_fixes = [
+            (r'\bDate_received\b', '"Date received"'),
+            (r'\bdate_received\b', '"Date received"'),
+            (r'\bIssue\b(?!\s*,|\s*FROM)', '"Issue"'),  # Quote Issue but not in FROM clause
+        ]
+        
+        for pattern, replacement in column_fixes:
+            fixed_query = re.sub(pattern, replacement, fixed_query)
+        
+        # Fix 3: Ensure strptime calls have proper format
+        # If we see strptime without format, add default format
+        if 'strptime(' in fixed_query and '"Date received"' in fixed_query:
+            # Look for strptime calls that might be missing format
+            strptime_pattern = r'strptime\s*\(\s*"Date received"\s*\)'
+            fixed_query = re.sub(strptime_pattern, 'strptime("Date received", \'%m/%d/%y\')', fixed_query)
+        
+        # Fix 4: Handle complex date arithmetic - replace with simple strptime
+        complex_date_pattern = r'DATE\s+\'[^\']+\'\s*\+\s*[^)]+'
+        if re.search(complex_date_pattern, fixed_query):
+            # Replace complex date arithmetic with simple strptime
+            fixed_query = re.sub(r'EXTRACT\s*\(\s*([^,]+)\s*FROM\s+DATE\s+\'[^\']+\'\s*\+[^)]+\)', 
+                               r'EXTRACT(\1 FROM strptime("Date received", \'%m/%d/%y\'))', 
+                               fixed_query, flags=re.IGNORECASE)
+        
+        return fixed_query
+
     def process_gpt_response(self, input_tables, messages, response):
         """process gpt response to handle execution"""
 
@@ -227,11 +287,16 @@ class SQLDataRecAgent(object):
             if len(code_blocks) > 0:
                 code_str = code_blocks[-1]
 
+                # Pre-validate and fix SQL before execution
+                fixed_code_str = self._fix_duckdb_syntax(code_str)
+                if fixed_code_str != code_str:
+                    logger.info(f"Fixed SQL: {fixed_code_str}")
+                
                 try:
                     random_suffix = ''.join(random.choices(string.ascii_lowercase, k=4))
                     table_name = f"view_{random_suffix}"
                     
-                    create_query = f"CREATE VIEW IF NOT EXISTS {table_name} AS {code_str}"
+                    create_query = f"CREATE VIEW IF NOT EXISTS {table_name} AS {fixed_code_str}"
                     self.conn.execute(create_query)
                     self.conn.commit()
 
@@ -243,7 +308,7 @@ class SQLDataRecAgent(object):
                 
                     result = {
                         "status": "ok",
-                        "code": code_str,
+                        "code": fixed_code_str,
                         "content": {
                             'rows': json.loads(query_output.to_json(orient='records')),
                             'virtual': {
@@ -253,10 +318,49 @@ class SQLDataRecAgent(object):
                         },
                     }
                 except Exception as e:
-                    logger.warning('other error:')
-                    error_message = traceback.format_exc()
-                    logger.warning(error_message)
-                    result = {'status': 'other error', 'code': code_str, 'content': f"Unexpected error: {error_message}"}
+                    logger.warning('SQL error, attempting additional fixes:')
+                    logger.warning(str(e))
+                    
+                    # Try additional fixes if the first attempt failed
+                    try:
+                        # More aggressive fixes for complex cases
+                        extra_fixed = fixed_code_str
+                        
+                        # Fix DATE_PART with DATE_PARSE inside
+                        extra_fixed = re.sub(r'DATE_PART\s*\(\s*[\'"]year[\'"]\s*,\s*DATE_PARSE\s*\([^)]+\)\s*\)', 
+                                           'EXTRACT(year FROM strptime("Date received", \'%m/%d/%y\'))', 
+                                           extra_fixed, flags=re.IGNORECASE)
+                        
+                        # Fix any remaining DATE_PARSE
+                        extra_fixed = re.sub(r'DATE_PARSE\s*\([^)]+\)', 
+                                           'strptime("Date received", \'%m/%d/%y\')', 
+                                           extra_fixed, flags=re.IGNORECASE)
+                        
+                        logger.info(f"Extra fixed SQL: {extra_fixed}")
+                        
+                        create_query = f"CREATE VIEW IF NOT EXISTS {table_name} AS {extra_fixed}"
+                        self.conn.execute(create_query)
+                        self.conn.commit()
+
+                        row_count = self.conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+                        query_output = self.conn.execute(f"SELECT * FROM {table_name} LIMIT 5000").fetch_df()
+                    
+                        result = {
+                            "status": "ok",
+                            "code": extra_fixed,
+                            "content": {
+                                'rows': json.loads(query_output.to_json(orient='records')),
+                                'virtual': {
+                                    'table_name': table_name,
+                                    'row_count': row_count
+                                }
+                            },
+                        }
+                    except Exception as e2:
+                        logger.warning('Final attempt failed:')
+                        error_message = traceback.format_exc()
+                        logger.warning(error_message)
+                        result = {'status': 'other error', 'code': fixed_code_str, 'content': f"Unexpected error: {error_message}"}
             else:
                 result = {'status': 'error', 'code': "", 'content': "No code block found in the response. The model is unable to generate code to complete the task."}
             
