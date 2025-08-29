@@ -65,7 +65,12 @@ class S3DataLoader(ExternalDataLoader):
         self.aws_secret_access_key = params.get("aws_secret_access_key", "")
         self.aws_session_token = params.get("aws_session_token", "")
         self.region_name = params.get("region_name", "us-east-1")
-        self.bucket = params.get("bucket", "")
+        raw_bucket = params.get("bucket", "")
+        
+        # Validate and sanitize bucket name
+        is_valid, self.bucket = self._validate_bucket_name(raw_bucket)
+        if not is_valid:
+            raise ValueError(f"Invalid S3 bucket name: {self.bucket}")
         
         # Install and load the httpfs extension for S3 access
         self.duck_db_conn.install_extension("httpfs")
@@ -153,6 +158,42 @@ class S3DataLoader(ExternalDataLoader):
         supported_extensions = ['.csv', '.parquet', '.json', '.jsonl']
         return any(key.lower().endswith(ext) for ext in supported_extensions)
     
+    def _validate_bucket_name(self, bucket_name: str):
+        """Validate S3 bucket name format according to AWS rules"""
+        import re
+        
+        # Trim whitespace
+        bucket_name = bucket_name.strip()
+        
+        # AWS bucket naming rules
+        if not bucket_name:
+            return False, "Bucket name cannot be empty"
+        
+        if len(bucket_name) < 3 or len(bucket_name) > 63:
+            return False, "Bucket name must be between 3 and 63 characters"
+        
+        # Check for invalid characters and format
+        # AWS bucket names must be lowercase letters, numbers, hyphens, and periods
+        # Cannot start or end with hyphen or period
+        # Cannot have consecutive periods or hyphens
+        pattern = r'^[a-z0-9][a-z0-9\-\.]*[a-z0-9]$'
+        if len(bucket_name) == 1:
+            pattern = r'^[a-z0-9]$'
+        
+        if not re.match(pattern, bucket_name):
+            return False, "Bucket name must contain only lowercase letters, numbers, hyphens, and periods. Cannot start or end with hyphen or period."
+        
+        # Check for consecutive periods or period-hyphen combinations
+        if '..' in bucket_name or '.-' in bucket_name or '-.' in bucket_name:
+            return False, "Bucket name cannot contain consecutive periods or period-hyphen combinations"
+        
+        # Check if it looks like an IP address
+        ip_pattern = r'^\d+\.\d+\.\d+\.\d+$'
+        if re.match(ip_pattern, bucket_name):
+            return False, "Bucket name cannot be formatted as an IP address"
+        
+        return True, bucket_name
+
     def _estimate_row_count(self, s3_url: str) -> int:
         """Estimate the number of rows in a file."""
         try:

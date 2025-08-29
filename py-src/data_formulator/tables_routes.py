@@ -15,6 +15,7 @@ import random
 import string
 from pathlib import Path
 import uuid
+import secrets
 
 from data_formulator.db_manager import db_manager
 from data_formulator.data_loader import DATA_LOADERS
@@ -37,12 +38,24 @@ import tempfile
 
 tables_bp = Blueprint('tables', __name__, url_prefix='/api/tables')
 
+def ensure_session():
+    """Ensure a valid session exists, create if missing"""
+    if 'session_id' not in session:
+        import secrets
+        session['session_id'] = secrets.token_hex(16)
+        session.permanent = True
+        logger.info(f"Auto-created session: {session['session_id']}")
+    return session['session_id']
+
 @tables_bp.route('/list-tables', methods=['GET'])
 def list_tables():
     """List all tables in the current session"""
     try:
+        # Ensure session has session_id
+        session_id = ensure_session()
+            
         result = []
-        with db_manager.connection(session['session_id']) as db:
+        with db_manager.connection(session_id) as db:
             table_metadata_list = db.execute("""
                 SELECT database_name, schema_name, table_name, schema_name==current_schema() as is_current_schema, 'table' as object_type 
                 FROM duckdb_tables() 
@@ -175,7 +188,8 @@ def sample_table():
         
         total_row_count = 0
         # Validate field names against table columns to prevent SQL injection
-        with db_manager.connection(session['session_id']) as db:
+        session_id = ensure_session()
+        with db_manager.connection(session_id) as db:
             # Get valid column names
             columns = [col[0] for col in db.execute(f"DESCRIBE {table_id}").fetchall()]
 
@@ -242,7 +256,8 @@ def sample_table():
 def get_table_data():
     """Get data from a specific table"""
     try:
-        with db_manager.connection(session['session_id']) as db:
+        session_id = ensure_session()
+        with db_manager.connection(session_id) as db:
 
             table_name = request.args.get('table_name')
             # Get pagination parameters
@@ -322,8 +337,9 @@ def create_table():
             return jsonify({"status": "error", "message": "No data provided"}), 400
 
         sanitized_table_name = sanitize_table_name(table_name)
-            
-        with db_manager.connection(session['session_id']) as db:
+        
+        session_id = ensure_session()    
+        with db_manager.connection(session_id) as db:
             # Check if table exists and generate unique name if needed
             base_name = sanitized_table_name
             counter = 1
@@ -369,8 +385,9 @@ def drop_table():
         
         if not table_name:
             return jsonify({"status": "error", "message": "No table name provided"}), 400
-            
-        with db_manager.connection(session['session_id']) as db:
+        
+        session_id = ensure_session()    
+        with db_manager.connection(session_id) as db:
             # First check if it exists as a view
             view_exists = db.execute(f"SELECT view_name FROM duckdb_views() WHERE view_name = '{table_name}'").fetchone() is not None
             if view_exists:
@@ -413,10 +430,7 @@ def upload_db_file():
             return jsonify({"status": "error", "message": "Invalid file format. Only .db files are supported"}), 400
 
         # Get the session ID
-        if 'session_id' not in session:
-            return jsonify({"status": "error", "message": "No session ID found"}), 400
-        
-        session_id = session['session_id']
+        session_id = ensure_session()
         
         # Create temp directory if it doesn't exist
         temp_dir = os.path.join(tempfile.gettempdir())
@@ -472,13 +486,7 @@ def download_db_file():
     """Download the db file for a session"""
     try:
         # Check if session exists
-        if 'session_id' not in session:
-            return jsonify({
-                "status": "error",
-                "message": "No session ID found"
-            }), 400
-        
-        session_id = session['session_id']
+        session_id = ensure_session()
         
         # Get the database file path from db_manager
         if session_id not in db_manager._db_files:
@@ -521,13 +529,7 @@ def download_db_file():
 def reset_db_file():
     """Reset the db file for a session"""
     try:
-        if 'session_id' not in session:
-            return jsonify({
-                "status": "error",
-                "message": "No session ID found"
-            }), 400
-            
-        session_id = session['session_id']
+        session_id = ensure_session()
 
         logger.info(f"session_id: {session_id}")
         
@@ -577,7 +579,8 @@ def query_table():
         if not query:
             return jsonify({"status": "error", "message": "No query provided"}), 400
         
-        with db_manager.connection(session['session_id']) as db:
+        session_id = ensure_session()
+        with db_manager.connection(session_id) as db:
             result = db.execute(query).fetch_df()
         
             return jsonify({
@@ -606,7 +609,8 @@ def analyze_table():
         if not table_name:
             return jsonify({"status": "error", "message": "No table name provided"}), 400
         
-        with db_manager.connection(session['session_id']) as db:
+        session_id = ensure_session()
+        with db_manager.connection(session_id) as db:
         
             # Get column information
             columns = db.execute(f"DESCRIBE {table_name}").fetchall()
@@ -721,6 +725,15 @@ def sanitize_db_error_message(error: Exception) -> Tuple[str, int]:
         r"No such file": (error_msg, 404),
         r"Permission denied": ("Access denied", 403),
 
+        # S3 and AWS errors
+        r"Invalid S3 bucket name": (error_msg, 400),
+        r"Parameter validation failed.*Invalid bucket name": ("Invalid S3 bucket name format. Please check for spaces or invalid characters.", 400),
+        r"Bucket name must match the regex": ("Invalid S3 bucket name format. Bucket names must contain only lowercase letters, numbers, and hyphens (3-63 characters).", 400),
+        r"NoCredentialsError": ("AWS credentials not found. Please check your access key and secret key.", 401),
+        r"InvalidAccessKeyId": ("Invalid AWS access key ID. Please verify your credentials.", 401),
+        r"SignatureDoesNotMatch": ("Invalid AWS secret access key. Please verify your credentials.", 401),
+        r"NoSuchBucket": ("S3 bucket not found. Please verify the bucket name and your permissions.", 404),
+
         # Data loader errors
         r"Entity ID": (error_msg, 500),
         r"session_id": ("session_id not found, please refresh the page", 500),
@@ -774,7 +787,8 @@ def data_loader_list_tables():
         if data_loader_type not in DATA_LOADERS:
             return jsonify({"status": "error", "message": f"Invalid data loader type. Must be one of: {', '.join(DATA_LOADERS.keys())}"}), 400
 
-        with db_manager.connection(session['session_id']) as duck_db_conn:
+        session_id = ensure_session()
+        with db_manager.connection(session_id) as duck_db_conn:
             data_loader = DATA_LOADERS[data_loader_type](data_loader_params, duck_db_conn)
             
             # Pass table_filter to list_tables if the data loader supports it
@@ -811,7 +825,8 @@ def data_loader_ingest_data():
         if data_loader_type not in DATA_LOADERS:
             return jsonify({"status": "error", "message": f"Invalid data loader type. Must be one of: {', '.join(DATA_LOADERS.keys())}"}), 400
 
-        with db_manager.connection(session['session_id']) as duck_db_conn:
+        session_id = ensure_session()
+        with db_manager.connection(session_id) as duck_db_conn:
             data_loader = DATA_LOADERS[data_loader_type](data_loader_params, duck_db_conn)
             data_loader.ingest_data(table_name)
 
@@ -842,7 +857,8 @@ def data_loader_view_query_sample():
         if data_loader_type not in DATA_LOADERS:
             return jsonify({"status": "error", "message": f"Invalid data loader type. Must be one of: {', '.join(DATA_LOADERS.keys())}"}), 400
         
-        with db_manager.connection(session['session_id']) as duck_db_conn:
+        session_id = ensure_session()
+        with db_manager.connection(session_id) as duck_db_conn:
             data_loader = DATA_LOADERS[data_loader_type](data_loader_params, duck_db_conn)
             sample = data_loader.view_query_sample(query)
 
@@ -875,7 +891,8 @@ def data_loader_ingest_data_from_query():
         if data_loader_type not in DATA_LOADERS:
             return jsonify({"status": "error", "message": f"Invalid data loader type. Must be one of: {', '.join(DATA_LOADERS.keys())}"}), 400
 
-        with db_manager.connection(session['session_id']) as duck_db_conn:
+        session_id = ensure_session()
+        with db_manager.connection(session_id) as duck_db_conn:
             data_loader = DATA_LOADERS[data_loader_type](data_loader_params, duck_db_conn)
             data_loader.ingest_data_from_query(query, name_as)
 

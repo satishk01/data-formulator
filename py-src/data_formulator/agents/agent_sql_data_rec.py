@@ -68,9 +68,13 @@ note:
 some notes:
 - in DuckDB, you escape a single quote within a string by doubling it ('') rather than using a backslash (\').
 - in DuckDB, you need to use proper date functions to perform date operations.
-- For date parsing in DuckDB, use strptime(date_string, format) instead of TO_DATE. For example: strptime("02/29/24", '%m/%d/%y')
+- CRITICAL: For date parsing in DuckDB, ALWAYS use strptime(date_string, format) instead of TO_DATE. TO_DATE does not exist in DuckDB!
+- Examples: strptime("02/29/24", '%m/%d/%y'), strptime("03-08-2024", '%m-%d-%Y')
 - For date parts in DuckDB, use DATE_PART('quarter', date_column) or EXTRACT(quarter FROM date_column)
 - Common DuckDB date formats: '%m/%d/%y' for MM/DD/YY, '%m-%d-%Y' for MM-DD-YYYY, '%Y-%m-%d' for YYYY-MM-DD
+- NEVER use TO_DATE, DATE, or other SQL Server/Oracle date functions - they don't exist in DuckDB
+- For current date, use CURRENT_DATE or TODAY()
+- For date arithmetic, use INTERVAL: date_column + INTERVAL 1 DAY
 '''
 
 example = """

@@ -207,6 +207,10 @@ def process_data_on_load_request():
 
         logger.info(f" model: {content['model']}")
 
+        if 'session_id' not in session:
+            import secrets
+            session['session_id'] = secrets.token_hex(16)
+            session.permanent = True
         conn = db_manager.get_connection(session['session_id'])
         agent = DataLoadAgent(client=client, conn=conn)
         
@@ -358,6 +362,10 @@ def derive_data():
         if len(new_fields) == 0:
             mode = "recommendation"
 
+        if 'session_id' not in session:
+            import secrets
+            session['session_id'] = secrets.token_hex(16)
+            session.permanent = True
         conn = db_manager.get_connection(session['session_id']) if language == "sql" else None
 
         if mode == "recommendation":
@@ -420,6 +428,10 @@ def refine_data():
         logger.info(output_fields)
         logger.info(new_instruction)
 
+        if 'session_id' not in session:
+            import secrets
+            session['session_id'] = secrets.token_hex(16)
+            session.permanent = True
         conn = db_manager.get_connection(session['session_id']) if language == "sql" else None
 
         # always resort to the data transform agent       

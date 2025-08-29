@@ -29,8 +29,13 @@ def sse_connect():
     session_id = session.get('session_id')
     connection_id = f"conn_{uuid.uuid4().hex[:8]}"
     
+    # Auto-create session if missing
     if not session_id:
-        return Response("No session ID found", status=401)
+        import secrets
+        session['session_id'] = secrets.token_hex(16)
+        session.permanent = True
+        session_id = session['session_id']
+        logger.info(f"Auto-created session for SSE: {session_id}")
     
     logger.info(f"[SSE Connect] Thread {threading.current_thread().name} accessing sse_connections")
     logger.info(f"[SSE Connect] sse_connections id: {id(sse_connections)}")
