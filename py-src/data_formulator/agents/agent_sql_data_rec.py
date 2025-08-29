@@ -65,21 +65,28 @@ note:
         - a json object (wrapped in ```json```) representing the refined goal (including "mode", "recommendation", "output_fields", "chart_type", "visualization_fields")
         - a sql query block (wrapped in ```sql```) representing the transformation code, do not add any extra text explanation.
 
-some notes:
-- in DuckDB, you escape a single quote within a string by doubling it ('') rather than using a backslash (\').
-- in DuckDB, you need to use proper date functions to perform date operations.
-- CRITICAL: For date parsing in DuckDB, ALWAYS use strptime(date_string, format) instead of TO_DATE. TO_DATE does not exist in DuckDB!
-- Examples: strptime("02/29/24", '%m/%d/%y'), strptime("03-08-2024", '%m-%d-%Y')
-- For date parts in DuckDB, use DATE_PART('quarter', date_column) or EXTRACT(quarter FROM date_column)
-- Common DuckDB date formats: '%m/%d/%y' for MM/DD/YY, '%m-%d-%Y' for MM-DD-YYYY, '%Y-%m-%d' for YYYY-MM-DD
-- NEVER use TO_DATE, DATE, or other SQL Server/Oracle date functions - they don't exist in DuckDB
-- For current date, use CURRENT_DATE or TODAY()
-- For date arithmetic, use INTERVAL: date_column + INTERVAL 1 DAY
-- CRITICAL: Column names with spaces MUST be quoted with double quotes. Example: "Date received" not Date received
-- CRITICAL: When parsing dates from string columns, use: strptime("Date received", '%m/%d/%y') or strptime("Date received", '%m-%d-%Y')
-- NEVER use complex date arithmetic like DATE '1970-01-01' + DATE_PART('day', column) - this is incorrect
-- For quarter extraction from date strings: EXTRACT(quarter FROM strptime("Date received", '%m/%d/%y'))
-- For year extraction from date strings: EXTRACT(year FROM strptime("Date received", '%m/%d/%y'))
+CRITICAL DUCKDB SYNTAX RULES - FOLLOW EXACTLY:
+- Column names with spaces MUST be quoted with double quotes: "Date received" NOT Date received
+- For date parsing: ONLY use strptime("Date received", '%m/%d/%y') - NEVER use TO_DATE, TRY_CAST, DATE_TRUNC
+- For date parts: EXTRACT(quarter FROM strptime("Date received", '%m/%d/%y'))
+- For year: EXTRACT(year FROM strptime("Date received", '%m/%d/%y'))
+- Common formats: '%m/%d/%y' for MM/DD/YY, '%m-%d-%Y' for MM-DD-YYYY
+- NEVER use: TO_DATE, DATE_TRUNC, TRY_CAST, CAST(...AS DATE) - these don't work in DuckDB
+- NEVER use: DATE '1970-01-01' + arithmetic - this is wrong
+- For current date: use CURRENT_DATE
+- Escape quotes: use '' not \'
+
+FORBIDDEN FUNCTIONS IN DUCKDB (DO NOT USE):
+- TO_DATE() - does not exist
+- DATE_TRUNC() - does not exist  
+- TRY_CAST() - does not exist
+- CAST(... AS DATE) - unreliable with string dates
+- Complex date arithmetic with DATE literals
+
+REQUIRED FUNCTIONS FOR DATES:
+- strptime(column, format) - for parsing date strings
+- EXTRACT(part FROM date) - for getting parts
+- DATE_PART('part', date) - alternative to EXTRACT
 '''
 
 example = """
@@ -137,22 +144,36 @@ FROM
     student_exam;  
 ```
 
-IMPORTANT DATE HANDLING EXAMPLE:
-If you have a table with a date column like "Date received" containing values like "02/29/24", "03-08-2024", here's how to handle it:
+CRITICAL DATE HANDLING EXAMPLES FOR DUCKDB:
 
+Example 1: Date column "Date received" with MM/DD/YY format (like "02/29/24"):
 ```sql
 SELECT 
-    Issue,
+    "Issue",
     EXTRACT(quarter FROM strptime("Date received", '%m/%d/%y')) AS Quarter,
     EXTRACT(year FROM strptime("Date received", '%m/%d/%y')) AS Year,
     COUNT(*) AS Total_Tickets
 FROM complaints_table
 WHERE EXTRACT(year FROM strptime("Date received", '%m/%d/%y')) = 2024
-GROUP BY Issue, Quarter, Year
+GROUP BY "Issue", Quarter, Year
 ORDER BY Quarter, Total_Tickets DESC;
 ```
 
-Note: Always quote column names with spaces using double quotes, and use strptime() for date parsing.
+Example 2: Date column with MM-DD-YYYY format (like "03-08-2024"):
+```sql
+SELECT 
+    "Issue",
+    EXTRACT(quarter FROM strptime("Date received", '%m-%d-%Y')) AS Quarter,
+    COUNT(*) AS Total_Tickets
+FROM complaints_table
+GROUP BY "Issue", Quarter
+ORDER BY Quarter, Total_Tickets DESC;
+```
+
+REMEMBER: 
+- Quote ALL column names with spaces: "Date received", "Issue"
+- ONLY use strptime() for date parsing
+- NEVER use DATE_TRUNC, TRY_CAST, TO_DATE
 """
 
 class SQLDataRecAgent(object):
