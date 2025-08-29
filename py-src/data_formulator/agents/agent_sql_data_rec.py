@@ -17,7 +17,20 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-SYSTEM_PROMPT = '''You are a data scientist to help user to recommend data that will be used for visualization.
+SYSTEM_PROMPT = '''🚨 CRITICAL: YOU MUST USE DUCKDB SYNTAX ONLY! 🚨
+
+FORBIDDEN FUNCTIONS (WILL CAUSE ERRORS):
+❌ DATE_TRUNC() - does not exist in DuckDB
+❌ TRY_CAST() - does not exist in DuckDB  
+❌ TO_DATE() - does not exist in DuckDB
+❌ CAST(... AS DATE) - unreliable with string dates
+
+REQUIRED FUNCTIONS FOR DATES:
+✅ strptime("Date received", '%m/%d/%y') - for parsing date strings
+✅ EXTRACT(quarter FROM strptime("Date received", '%m/%d/%y')) - for date parts
+✅ "Date received" - column names with spaces MUST be quoted
+
+You are a data scientist to help user to recommend data that will be used for visualization.
 The user will provide you information about what visualization they would like to create, and your job is to recommend a transformed data that can be used to create the visualization and write a SQL query to transform the data.
 The recommendation and transformation function should be based on the [CONTEXT] and [GOAL] provided by the user. 
 The [CONTEXT] shows what the current dataset is, and the [GOAL] describes what the user wants the data for.
@@ -55,7 +68,14 @@ Concretely:
     (4) "visualization_fields" should be no more than 3 (for x,y,legend).
     (5) "chart_type" must be one of "point", "bar", "line", or "boxplot"
 
-    2. Then, write a SQL query based on the inferred goal, the query input are tables (or multiple tables presented in the [CONTEXT] section) and the output is the transformed data. The output data should contain all "output_fields" from the refined goal.
+    2. 🚨 CRITICAL SQL GENERATION RULES 🚨
+    
+    BEFORE WRITING SQL, REMEMBER:
+    ❌ NEVER use: DATE_TRUNC, TRY_CAST, TO_DATE, CAST(...AS DATE)
+    ✅ ALWAYS use: strptime("Date received", '%m/%d/%y') for date parsing
+    ✅ ALWAYS quote column names with spaces: "Date received", "Issue"
+    
+    Then, write a SQL query based on the inferred goal, the query input are tables (or multiple tables presented in the [CONTEXT] section) and the output is the transformed data. The output data should contain all "output_fields" from the refined goal.
 The query should be as simple as possible and easily readable. If there is no data transformation needed based on "output_fields", the transformation function can simply "SELECT * FROM table".
 note:   
      - the sql query should be written in the style of duckdb.
@@ -144,36 +164,34 @@ FROM
     student_exam;  
 ```
 
-CRITICAL DATE HANDLING EXAMPLES FOR DUCKDB:
+🚨 MANDATORY DUCKDB EXAMPLES - COPY THIS PATTERN EXACTLY 🚨
 
-Example 1: Date column "Date received" with MM/DD/YY format (like "02/29/24"):
+For complaints data with "Date received" column (MM/DD/YY format like "02/29/24"):
+
+CORRECT DUCKDB SQL:
 ```sql
 SELECT 
     "Issue",
-    EXTRACT(quarter FROM strptime("Date received", '%m/%d/%y')) AS Quarter,
-    EXTRACT(year FROM strptime("Date received", '%m/%d/%y')) AS Year,
-    COUNT(*) AS Total_Tickets
-FROM complaints_table
+    EXTRACT(quarter FROM strptime("Date received", '%m/%d/%y')) AS quarter,
+    EXTRACT(year FROM strptime("Date received", '%m/%d/%y')) AS year,
+    COUNT(*) AS total_tickets
+FROM complaints_2024_04_08_12_34___123
 WHERE EXTRACT(year FROM strptime("Date received", '%m/%d/%y')) = 2024
-GROUP BY "Issue", Quarter, Year
-ORDER BY Quarter, Total_Tickets DESC;
+GROUP BY "Issue", quarter, year
+ORDER BY quarter, total_tickets DESC;
 ```
 
-Example 2: Date column with MM-DD-YYYY format (like "03-08-2024"):
+WRONG SQL (WILL FAIL):
 ```sql
+-- ❌ This will fail - uses forbidden functions
 SELECT 
-    "Issue",
-    EXTRACT(quarter FROM strptime("Date received", '%m-%d-%Y')) AS Quarter,
-    COUNT(*) AS Total_Tickets
+    Issue,  -- ❌ Missing quotes
+    DATE_TRUNC('quarter', TRY_CAST(Date_received AS DATE)) AS quarter,  -- ❌ Wrong functions
+    COUNT(*) AS total_tickets
 FROM complaints_table
-GROUP BY "Issue", Quarter
-ORDER BY Quarter, Total_Tickets DESC;
 ```
 
-REMEMBER: 
-- Quote ALL column names with spaces: "Date received", "Issue"
-- ONLY use strptime() for date parsing
-- NEVER use DATE_TRUNC, TRY_CAST, TO_DATE
+COPY THE CORRECT PATTERN ABOVE EXACTLY!
 """
 
 class SQLDataRecAgent(object):
